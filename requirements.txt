@@ -1,5 +1,5 @@
-fastapi
-uvicorn
-apscheduler
+flask
 requests
-libsql
+numpy
+scipy
+gunicorn
