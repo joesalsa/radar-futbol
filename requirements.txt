@@ -3,4 +3,4 @@ requests
 numpy
 scipy
 gunicorn
-libsql-client
+libsql
