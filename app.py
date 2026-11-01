@@ -25,17 +25,22 @@ ESTADO_INFO      = {
 }
 
 HISTORIAL_FILE = "historial.json"
-
-# ==== CONEXIÓN A TURSO ====
 cliente_turso = None
-if TURSO_URL and TURSO_TOKEN:
-    try:
-        cliente_turso = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
-        # Creamos la tabla si no existe
-        cliente_turso.execute("CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT)")
-        print("✅ Conectado a Turso", flush=True)
-    except Exception as e:
-        print(f"❌ Error conectando a Turso: {e}", flush=True)
+
+# ==== CONEXIÓN A TURSO (ASÍNCRONA) ====
+def init_turso():
+    global cliente_turso
+    if TURSO_URL and TURSO_TOKEN:
+        try:
+            cliente_turso = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
+            cliente_turso.execute("CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT)")
+            print("✅ Conectado a Turso", flush=True)
+            cargar_historial() # Cargamos el historial una vez conectados
+        except Exception as e:
+            print(f"❌ Error conectando a Turso: {e}", flush=True)
+            cargar_historial() # Si falla, leemos el disco
+    else:
+        cargar_historial()
 
 LIGAS_TOP = {
     "eng.1": "Premier League", "eng.3": "League One", "esp.1": "La Liga",
@@ -58,7 +63,6 @@ PERFIL_DEFAULT = {
 def cargar_historial():
     global HISTORIAL, ALERTAS_ENVIADAS
     
-    # 1. Intentar leer de Turso
     if cliente_turso:
         try:
             rs = cliente_turso.execute("SELECT value FROM bot_state WHERE key = 'historial'")
@@ -71,7 +75,6 @@ def cargar_historial():
         except Exception as e:
             print(f"Error leyendo Turso: {e}", flush=True)
 
-    # 2. Si Turso está vacío, leer el archivo JSON local
     if os.path.exists(HISTORIAL_FILE):
         try:
             with open(HISTORIAL_FILE, 'r', encoding='utf-8') as f:
@@ -79,14 +82,12 @@ def cargar_historial():
             for h in HISTORIAL:
                 ALERTAS_ENVIADAS.add(h['id'])
             print(f"✅ Historial cargado desde DISCO ({len(HISTORIAL)} alertas)", flush=True)
-            # Subir los datos locales a Turso para inicializar la nube
             if cliente_turso and len(HISTORIAL) > 0:
-                guardar_historial()
+                guardar_historial() 
         except Exception:
             HISTORIAL = []
 
 def guardar_historial():
-    # Guardar en Turso
     if cliente_turso:
         try:
             data_str = json.dumps(HISTORIAL, ensure_ascii=False)
@@ -95,14 +96,11 @@ def guardar_historial():
         except Exception as e:
             print(f"❌ Error guardando en Turso: {e}", flush=True)
             
-    # Guardar en disco como respaldo
     try:
         with open(HISTORIAL_FILE, 'w', encoding='utf-8') as f:
             json.dump(HISTORIAL, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-
-cargar_historial()
 
 # ==== TELEGRAM ====
 def enviar_alerta_telegram(mensaje):
@@ -321,7 +319,6 @@ def escanear_partidos():
                     factor = ((tiros / max(1, 25*fr)) + (corners / max(1, 10*fr))) / 2.0
                     factor = max(0.5, min(2.0, factor))
 
-                # HT
                 if 15 <= minuto <= 35 and gt == 0 and factor > 1.1:
                     clave = f"{event_id}_HT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -357,7 +354,6 @@ def escanear_partidos():
                             })
                             guardar_historial()
 
-                # FT
                 elif 70 <= minuto <= 80:
                     clave = f"{event_id}_FT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -492,7 +488,6 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
-    cargar_historial() 
     total = len(HISTORIAL); ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada'); perdidas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Perdida')
     ev = ganadas + perdidas; wr = round((ganadas / ev * 100), 1) if ev else 0.0
     return render_template_string(HTML_TEMPLATE, scanner_activo=SCANNER_ACTIVO, historial=list(reversed(HISTORIAL))[-50:], total=total, ganadas=ganadas, perdidas=perdidas, winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"], vivos=ESTADO_INFO["vivos"])
@@ -508,11 +503,13 @@ def start():
 @app.route('/ping')
 def ping(): return "pong", 200
 
+# ==== ARRANQUE ====
 def _start_scanner():
     t = threading.Thread(target=loop_escaner, daemon=True); t.start()
     print("🚀 Hilo del escáner iniciado", flush=True)
 
 _start_scanner()
+threading.Thread(target=init_turso, daemon=True).start() # Iniciamos Turso en 2do plano
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
