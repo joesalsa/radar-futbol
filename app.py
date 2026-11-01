@@ -2,14 +2,11 @@ import requests, numpy as np, os, json, threading, time
 from scipy.stats import poisson
 from datetime import datetime
 from flask import Flask, redirect, render_template_string
-import libsql_client
 
 # ==== VARIABLES DE ENTORNO ====
 TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID")
 INFERSPORTS_API_KEY = os.environ.get("INFERSPORTS_API_KEY")
-TURSO_URL           = os.environ.get("TURSO_URL")
-TURSO_TOKEN         = os.environ.get("TURSO_TOKEN")
 
 app = Flask(__name__)
 
@@ -22,25 +19,10 @@ ESTADO_INFO      = {
     "ultimo_scan": "-",
     "vivos": 0,
     "inicio": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    "ciclо": 0,
 }
 
 HISTORIAL_FILE = "historial.json"
-cliente_turso = None
-
-# ==== CONEXIÓN A TURSO (ASÍNCRONA) ====
-def init_turso():
-    global cliente_turso
-    if TURSO_URL and TURSO_TOKEN:
-        try:
-            cliente_turso = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
-            cliente_turso.execute("CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT)")
-            print("✅ Conectado a Turso", flush=True)
-            cargar_historial() # Cargamos el historial una vez conectados
-        except Exception as e:
-            print(f"❌ Error conectando a Turso: {e}", flush=True)
-            cargar_historial() # Si falla, leemos el disco
-    else:
-        cargar_historial()
 
 LIGAS_TOP = {
     "eng.1": "Premier League", "eng.3": "League One", "esp.1": "La Liga",
@@ -62,47 +44,25 @@ PERFIL_DEFAULT = {
 # ==== HISTORIAL ====
 def cargar_historial():
     global HISTORIAL, ALERTAS_ENVIADAS
-    
-    if cliente_turso:
-        try:
-            rs = cliente_turso.execute("SELECT value FROM bot_state WHERE key = 'historial'")
-            if rs.rows:
-                HISTORIAL = json.loads(rs.rows[0][0])
-                for h in HISTORIAL:
-                    ALERTAS_ENVIADAS.add(h['id'])
-                print(f"✅ Historial cargado desde TURSO ({len(HISTORIAL)} alertas)", flush=True)
-                return
-        except Exception as e:
-            print(f"Error leyendo Turso: {e}", flush=True)
-
     if os.path.exists(HISTORIAL_FILE):
         try:
             with open(HISTORIAL_FILE, 'r', encoding='utf-8') as f:
                 HISTORIAL = json.load(f)
             for h in HISTORIAL:
                 ALERTAS_ENVIADAS.add(h['id'])
-            print(f"✅ Historial cargado desde DISCO ({len(HISTORIAL)} alertas)", flush=True)
-            if cliente_turso and len(HISTORIAL) > 0:
-                guardar_historial() 
         except Exception:
             HISTORIAL = []
 
 def guardar_historial():
-    if cliente_turso:
-        try:
-            data_str = json.dumps(HISTORIAL, ensure_ascii=False)
-            cliente_turso.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)", ["historial", data_str])
-            print(f"☁️ Historial guardado en TURSO ({len(HISTORIAL)} alertas)", flush=True)
-        except Exception as e:
-            print(f"❌ Error guardando en Turso: {e}", flush=True)
-            
     try:
         with open(HISTORIAL_FILE, 'w', encoding='utf-8') as f:
             json.dump(HISTORIAL, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
-# ==== TELEGRAM ====
+cargar_historial()
+
+# ==== TELEGRAM (solo envía) ====
 def enviar_alerta_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
@@ -319,6 +279,7 @@ def escanear_partidos():
                     factor = ((tiros / max(1, 25*fr)) + (corners / max(1, 10*fr))) / 2.0
                     factor = max(0.5, min(2.0, factor))
 
+                # HT
                 if 15 <= minuto <= 35 and gt == 0 and factor > 1.1:
                     clave = f"{event_id}_HT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -354,6 +315,7 @@ def escanear_partidos():
                             })
                             guardar_historial()
 
+                # FT (A PARTIR DEL MINUTO 70)
                 elif 70 <= minuto <= 80:
                     clave = f"{event_id}_FT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -401,6 +363,7 @@ def loop_escaner():
                 vivos = escanear_partidos()
                 ESTADO_INFO["vivos"] = vivos
                 ESTADO_INFO["ultimo_scan"] = datetime.now().strftime("%H:%M:%S")
+                ESTADO_INFO["ciclо"] += 1
                 print(f"[{ESTADO_INFO['ultimo_scan']}] Vivos: {vivos} | Alertas: {len(HISTORIAL)} | Caché: {len(MEMORIA_EQUIPOS)}", flush=True)
             else:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Pausado", flush=True)
@@ -410,7 +373,7 @@ def loop_escaner():
             print(f"Loop err: {e}", flush=True)
         time.sleep(300)
 
-# ==== DASHBOARD HTML ====
+# ==== DASHBOARD HTML (ESTILO NBA) ====
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -419,66 +382,122 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="refresh" content="30">
     <style>
-        :root { --bg: #0f172a; --card-bg: #1e293b; --text-main: #f8fafc; --text-muted: #94a3b8; --green: #10b981; --red: #ef4444; --yellow: #eab308; --blue: #3b82f6; }
+        :root {
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --green: #10b981;
+            --red: #ef4444;
+            --yellow: #eab308;
+            --blue: #3b82f6;
+        }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text-main); padding: 16px; max-width: 800px; margin: auto; }
+        
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         h1 { margin: 0; font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
         .btn { padding: 10px 16px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none; color: white; transition: 0.2s; }
-        .btn-stop { background: var(--red); } .btn-start { background: var(--green); }
+        .btn-stop { background: var(--red); }
+        .btn-start { background: var(--green); }
+        
         .info-bar { display: flex; justify-content: space-between; background: var(--card-bg); padding: 12px 16px; border-radius: 12px; margin-bottom: 20px; font-size: 13px; color: var(--text-muted); }
         .info-bar span { font-weight: bold; color: var(--text-main); }
         .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase; }
-        .badge-on { background: rgba(16, 185, 129, 0.2); color: var(--green); } .badge-off { background: rgba(239, 68, 68, 0.2); color: var(--red); }
+        .badge-on { background: rgba(16, 185, 129, 0.2); color: var(--green); }
+        .badge-off { background: rgba(239, 68, 68, 0.2); color: var(--red); }
+
         .stats { background: var(--card-bg); padding: 20px; border-radius: 12px; margin-bottom: 24px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; text-align: center; }
         .stat-item { display: flex; flex-direction: column; gap: 4px; }
         .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
         .stat-value { font-size: 22px; font-weight: bold; }
-        .v-green { color: var(--green); } .v-red { color: var(--red); } .v-yellow { color: var(--yellow); }
+        .v-green { color: var(--green); }
+        .v-red { color: var(--red); }
+        .v-yellow { color: var(--yellow); }
+
         .section-title { font-size: 13px; font-weight: bold; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+        
         .card-list { display: flex; flex-direction: column; gap: 12px; }
         .card { background: var(--card-bg); border-radius: 12px; padding: 16px; border-left: 4px solid var(--yellow); display: flex; flex-direction: column; gap: 8px; }
-        .card.ganada { border-left-color: var(--green); } .card.perdida { border-left-color: var(--red); }
+        .card.ganada { border-left-color: var(--green); }
+        .card.perdida { border-left-color: var(--red); }
+        
         .card-header { display: flex; justify-content: space-between; align-items: flex-start; }
-        .card-title { font-size: 15px; font-weight: bold; margin: 0; } .card-liga { font-size: 12px; color: var(--text-muted); }
+        .card-title { font-size: 15px; font-weight: bold; margin: 0; }
+        .card-liga { font-size: 12px; color: var(--text-muted); }
+        
         .card-body { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
-        .bet-info { font-size: 14px; font-weight: bold; color: var(--blue); } .bet-cuota { font-size: 14px; color: var(--text-main); }
+        .bet-info { font-size: 14px; font-weight: bold; color: var(--blue); }
+        .bet-cuota { font-size: 14px; color: var(--text-main); }
+        
         .card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 12px; }
-        .time { color: var(--text-muted); } .res-badge { font-weight: bold; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
-        .res-pendiente { color: var(--yellow); } .res-ganada { color: var(--green); } .res-perdida { color: var(--red); }
+        .edge { background: rgba(16, 185, 129, 0.15); color: var(--green); padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+        .time { color: var(--text-muted); }
+        .res-badge { font-weight: bold; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
+        .res-pendiente { color: var(--yellow); }
+        .res-ganada { color: var(--green); }
+        .res-perdida { color: var(--red); }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>⚽ Radar Fútbol</h1>
-        {% if scanner_activo %}<a href="/stop" class="btn btn-stop">🛑 Detener</a>
-        {% else %}<a href="/start" class="btn btn-start">▶ Reanudar</a>{% endif %}
+        {% if scanner_activo %}
+            <a href="/stop" class="btn btn-stop">🛑 Detener</a>
+        {% else %}
+            <a href="/start" class="btn btn-start">▶ Reanudar</a>
+        {% endif %}
     </div>
+
     <div class="info-bar">
         <div>Estado: <span class="badge {% if scanner_activo %}badge-on{% else %}badge-off{% endif %}">{% if scanner_activo %}ACTIVO{% else %}PAUSADO{% endif %}</span></div>
         <div>Último scan: <span>{{ ultimo_scan }}</span></div>
         <div>Vivos: <span>{{ vivos }}</span></div>
     </div>
+
     <div class="stats">
-        <div class="stat-item"><div class="stat-label">Total</div><div class="stat-value">{{ total }}</div></div>
-        <div class="stat-item"><div class="stat-label">Ganadas</div><div class="stat-value v-green">{{ ganadas }}</div></div>
-        <div class="stat-item"><div class="stat-label">Perdidas</div><div class="stat-value v-red">{{ perdidas }}</div></div>
-        <div class="stat-item"><div class="stat-label">Win Rate</div><div class="stat-value v-yellow">{{ winrate }}%</div></div>
+        <div class="stat-item">
+            <div class="stat-label">Total</div>
+            <div class="stat-value">{{ total }}</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-label">Ganadas</div>
+            <div class="stat-value v-green">{{ ganadas }}</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-label">Perdidas</div>
+            <div class="stat-value v-red">{{ perdidas }}</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-label">Win Rate</div>
+            <div class="stat-value v-yellow">{{ winrate }}%</div>
+        </div>
     </div>
+
     <div class="section-title">Señales Recientes</div>
     <div class="card-list">
         {% for a in historial %}
         <div class="card {{ a.resultado|lower }}">
             <div class="card-header">
-                <div><p class="card-title">{{ a.partido }}</p><span class="card-liga">{{ a.liga_nombre }} | {{ a.mercado }}</span></div>
+                <div>
+                    <p class="card-title">{{ a.partido }}</p>
+                    <span class="card-liga">{{ a.liga_nombre }} | {{ a.mercado }}</span>
+                </div>
                 <span class="res-badge res-{{ a.resultado|lower }}">{{ a.resultado|upper }}</span>
             </div>
+            
             <div class="card-body">
-                <div class="bet-info">{{ a.recomendacion }} {{ a.linea }}</div><div class="bet-cuota">@ {{ a.cuota }}</div>
+                <div class="bet-info">{{ a.recomendacion }} {{ a.linea }}</div>
+                <div class="bet-cuota">@ {{ a.cuota }}</div>
             </div>
-            <div class="card-footer"><div class="time">{{ a.fecha }}</div></div>
+            
+            <div class="card-footer">
+                <div class="time">{{ a.fecha }}</div>
+            </div>
         </div>
         {% else %}
-        <div style="text-align: center; color: var(--text-muted); padding: 20px;">No hay señales todavía. El bot está escaneando...</div>
+        <div style="text-align: center; color: var(--text-muted); padding: 20px;">
+            No hay señales todavía. El bot está escaneando...
+        </div>
         {% endfor %}
     </div>
 </body>
@@ -488,28 +507,46 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
-    total = len(HISTORIAL); ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada'); perdidas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Perdida')
-    ev = ganadas + perdidas; wr = round((ganadas / ev * 100), 1) if ev else 0.0
-    return render_template_string(HTML_TEMPLATE, scanner_activo=SCANNER_ACTIVO, historial=list(reversed(HISTORIAL))[-50:], total=total, ganadas=ganadas, perdidas=perdidas, winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"], vivos=ESTADO_INFO["vivos"])
+    cargar_historial() # ¡Esto arregla que el panel se quede en 0!
+    
+    total = len(HISTORIAL)
+    ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada')
+    perdidas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Perdida')
+    ev = ganadas + perdidas
+    wr = round((ganadas / ev * 100), 1) if ev else 0.0
+    
+    return render_template_string(
+        HTML_TEMPLATE,
+        scanner_activo=SCANNER_ACTIVO,
+        historial=list(reversed(HISTORIAL))[-50:], 
+        total=total, ganadas=ganadas, perdidas=perdidas,
+        winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
+        vivos=ESTADO_INFO["vivos"]
+    )
 
 @app.route('/stop')
 def stop():
-    global SCANNER_ACTIVO; SCANNER_ACTIVO = False; return redirect('/')
+    global SCANNER_ACTIVO
+    SCANNER_ACTIVO = False
+    return redirect('/')
 
 @app.route('/start')
 def start():
-    global SCANNER_ACTIVO; SCANNER_ACTIVO = True; return redirect('/')
+    global SCANNER_ACTIVO
+    SCANNER_ACTIVO = True
+    return redirect('/')
 
 @app.route('/ping')
-def ping(): return "pong", 200
+def ping():
+    return "pong", 200
 
 # ==== ARRANQUE ====
 def _start_scanner():
-    t = threading.Thread(target=loop_escaner, daemon=True); t.start()
+    t = threading.Thread(target=loop_escaner, daemon=True)
+    t.start()
     print("🚀 Hilo del escáner iniciado", flush=True)
 
 _start_scanner()
-threading.Thread(target=init_turso, daemon=True).start() # Iniciamos Turso en 2do plano
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
