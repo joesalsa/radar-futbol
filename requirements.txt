@@ -1,6 +1,5 @@
-flask
+fastapi
+uvicorn
+apscheduler
 requests
-numpy
-scipy
-gunicorn
 libsql
