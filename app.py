@@ -48,11 +48,10 @@ def cargar_historial():
         try:
             with open(HISTORIAL_FILE, 'r', encoding='utf-8') as f:
                 HISTORIAL = json.load(f)
-            # Sincronizamos las alertas enviadas para no repetir
             for h in HISTORIAL:
                 ALERTAS_ENVIADAS.add(h['id'])
         except Exception:
-            pass
+            HISTORIAL = []
 
 def guardar_historial():
     try:
@@ -316,7 +315,7 @@ def escanear_partidos():
                             })
                             guardar_historial()
 
-                # FT
+                # FT (A PARTIR DEL MINUTO 70)
                 elif 70 <= minuto <= 80:
                     clave = f"{event_id}_FT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -395,21 +394,18 @@ HTML_TEMPLATE = """
         }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text-main); padding: 16px; max-width: 800px; margin: auto; }
         
-        /* Header */
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
         h1 { margin: 0; font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
         .btn { padding: 10px 16px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none; color: white; transition: 0.2s; }
         .btn-stop { background: var(--red); }
         .btn-start { background: var(--green); }
         
-        /* Info Bar */
         .info-bar { display: flex; justify-content: space-between; background: var(--card-bg); padding: 12px 16px; border-radius: 12px; margin-bottom: 20px; font-size: 13px; color: var(--text-muted); }
         .info-bar span { font-weight: bold; color: var(--text-main); }
         .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase; }
         .badge-on { background: rgba(16, 185, 129, 0.2); color: var(--green); }
         .badge-off { background: rgba(239, 68, 68, 0.2); color: var(--red); }
 
-        /* Stats Box */
         .stats { background: var(--card-bg); padding: 20px; border-radius: 12px; margin-bottom: 24px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; text-align: center; }
         .stat-item { display: flex; flex-direction: column; gap: 4px; }
         .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -418,10 +414,8 @@ HTML_TEMPLATE = """
         .v-red { color: var(--red); }
         .v-yellow { color: var(--yellow); }
 
-        /* Section Title */
         .section-title { font-size: 13px; font-weight: bold; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
         
-        /* Cards */
         .card-list { display: flex; flex-direction: column; gap: 12px; }
         .card { background: var(--card-bg); border-radius: 12px; padding: 16px; border-left: 4px solid var(--yellow); display: flex; flex-direction: column; gap: 8px; }
         .card.ganada { border-left-color: var(--green); }
@@ -498,7 +492,6 @@ HTML_TEMPLATE = """
             
             <div class="card-footer">
                 <div class="time">{{ a.fecha }}</div>
-                <!-- Mostramos un Edge ficticio si no lo guardamos, o podemos calcularlo si lo añadimos al JSON -->
             </div>
         </div>
         {% else %}
@@ -514,8 +507,7 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
-    # ¡CLAVE! Forzamos a leer el disco para que el panel vea lo que el hilo escribe
-    cargar_historial() 
+    cargar_historial() # ¡Esto arregla que el panel se quede en 0!
     
     total = len(HISTORIAL)
     ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada')
@@ -526,7 +518,7 @@ def home():
     return render_template_string(
         HTML_TEMPLATE,
         scanner_activo=SCANNER_ACTIVO,
-        historial=list(reversed(HISTORIAL))[-50:], # Mostrar las últimas 50
+        historial=list(reversed(HISTORIAL))[-50:], 
         total=total, ganadas=ganadas, perdidas=perdidas,
         winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
         vivos=ESTADO_INFO["vivos"]
