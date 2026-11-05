@@ -104,12 +104,26 @@ def cargar_historial():
         print(f"[cargar_historial] Error: {e}", flush=True)
         HISTORIAL = []
 
-def guardar_historial():
+def guardar_alerta_turso(h):
     try:
-        with open(HISTORIAL_FILE, 'w', encoding='utf-8') as f:
-            json.dump(HISTORIAL, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        with db() as con:
+            con.execute("""
+                INSERT OR REPLACE INTO historial_apuestas
+                (id, fecha, partido, liga_nombre, mercado, recomendacion,
+                 linea, cuota, resultado, liga_code, event_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (h["id"], h["fecha"], h["partido"], h["liga_nombre"],
+                  h["mercado"], h["recomendacion"], h["linea"], h["cuota"],
+                  h["resultado"], h.get("liga_code"), h.get("event_id")))
+    except Exception as e:
+        print(f"[guardar_alerta_turso] Error: {e}", flush=True)
+
+def actualizar_resultado_turso(alert_id, resultado):
+    try:
+        with db() as con:
+            con.execute("UPDATE historial_apuestas SET resultado=? WHERE id=?", (resultado, alert_id))
+    except Exception as e:
+        print(f"[actualizar_resultado_turso] Error: {e}", flush=True)
 
 init_db()
 cargar_historial()
@@ -263,7 +277,6 @@ def buscar_cuota_infersports(eq_l, eq_v, periodo="full_time"):
 # ==== VERIFICAR RESULTADOS ====
 def verificar_resultados():
     global HISTORIAL
-    actualizado = False
     for h in HISTORIAL:
         if h.get('resultado') != 'Pendiente': continue
         try:
@@ -290,11 +303,12 @@ def verificar_resultados():
                 h['resultado'] = 'Ganada' if total_ref > h['linea'] else 'Perdida'
             else:
                 h['resultado'] = 'Ganada' if total_ref < h['linea'] else 'Perdida'
-            actualizado = True
+            
+            # Actualizamos directo en Turso
+            actualizar_resultado_turso(h['id'], h['resultado'])
+            
         except Exception:
             continue
-    if actualizado:
-        guardar_historial()
 
 # ==== ESCANEO ====
 def escanear_partidos():
@@ -359,13 +373,15 @@ def escanear_partidos():
                                        f"📊 Prob gol antes descanso: *{prob:.1f}%*\n⚠️ Sin cuota disponible.")
                                 cuota_reg = 0
                             enviar_alerta_telegram(msj)
-                            HISTORIAL.append({
+                            
+                            alerta = {
                                 "id": clave, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
                                 "liga_code": liga_code, "event_id": event_id, "partido": nombre, "liga_nombre": liga_nombre,
                                 "mercado": "HT", "recomendacion": "OVER", "linea": linea,
                                 "cuota": cuota_reg, "resultado": "Pendiente"
-                            })
-                            guardar_historial()
+                            }
+                            HISTORIAL.append(alerta)
+                            guardar_alerta_turso(alerta)
 
                 # FT (A PARTIR DEL MINUTO 70)
                 elif 70 <= minuto <= 80:
@@ -395,13 +411,15 @@ def escanear_partidos():
                                        f"🔥 *RECOMENDACIÓN: {rec} {linea} @ {cf:.2f}* ({cuotas['bookmaker']})\n"
                                        f"📊 Bot: *{pb:.1f}%* vs Casa: {pc:.1f}% → Edge {vv:+.1f}%")
                                 enviar_alerta_telegram(msj)
-                                HISTORIAL.append({
+                                
+                                alerta = {
                                     "id": clave, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
                                     "liga_code": liga_code, "event_id": event_id, "partido": nombre, "liga_nombre": liga_nombre,
                                     "mercado": "FT", "recomendacion": rec, "linea": linea,
                                     "cuota": cf, "resultado": "Pendiente"
-                                })
-                                guardar_historial()
+                                }
+                                HISTORIAL.append(alerta)
+                                guardar_alerta_turso(alerta)
         except Exception:
             continue
     return vivos
@@ -559,7 +577,7 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
-    cargar_historial() # ¡Esto arregla que el panel se quede en 0!
+    # La función cargar_historial() ha sido removida de aquí para no saturar Turso en cada refresh.
     
     total = len(HISTORIAL)
     ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada')
