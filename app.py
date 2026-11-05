@@ -1,4 +1,6 @@
 import requests, numpy as np, os, json, threading, time
+import libsql
+from contextlib import contextmanager
 from scipy.stats import poisson
 from datetime import datetime
 from flask import Flask, redirect, render_template_string
@@ -7,6 +9,19 @@ from flask import Flask, redirect, render_template_string
 TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID")
 INFERSPORTS_API_KEY = os.environ.get("INFERSPORTS_API_KEY")
+TURSO_URL   = os.environ.get("TURSO_DATABASE_URL")
+TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
+
+
+@contextmanager
+def db():
+    con = libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
+    try:
+        yield con
+        con.commit()
+    finally:
+        con.close()
+
 
 app = Flask(__name__)
 
@@ -42,6 +57,26 @@ PERFIL_DEFAULT = {
 }
 
 # ==== HISTORIAL ====
+def init_db():
+    with db() as con:
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS historial_apuestas (
+                id TEXT PRIMARY KEY,
+                fecha TEXT,
+                partido TEXT,
+                liga_nombre TEXT,
+                mercado TEXT,
+                recomendacion TEXT,
+                linea REAL,
+                cuota REAL,
+                resultado TEXT,
+                liga_code TEXT,
+                event_id TEXT
+            );
+        """)
+    print("🗄️ Tabla lista en Turso", flush=True)
+
+
 def cargar_historial():
     global HISTORIAL, ALERTAS_ENVIADAS
     if os.path.exists(HISTORIAL_FILE):
@@ -60,6 +95,7 @@ def guardar_historial():
     except Exception:
         pass
 
+init_db()
 cargar_historial()
 
 # ==== TELEGRAM (solo envía) ====
