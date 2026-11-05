@@ -37,8 +37,6 @@ ESTADO_INFO      = {
     "ciclо": 0,
 }
 
-HISTORIAL_FILE = "historial.json"
-
 LIGAS_TOP = {
     "eng.1": "Premier League", "eng.3": "League One", "esp.1": "La Liga",
     "ita.1": "Serie A", "ger.1": "Bundesliga", "fra.1": "Ligue 1",
@@ -81,7 +79,6 @@ def cargar_historial():
     global HISTORIAL, ALERTAS_ENVIADAS
     try:
         with db() as con:
-            # Traemos hasta 1000 registros ordenados por fecha
             rows = con.execute("""
                 SELECT id, fecha, partido, liga_nombre, mercado, recomendacion,
                        linea, cuota, resultado, liga_code, event_id
@@ -304,7 +301,6 @@ def verificar_resultados():
             else:
                 h['resultado'] = 'Ganada' if total_ref < h['linea'] else 'Perdida'
             
-            # Actualizamos directo en Turso
             actualizar_resultado_turso(h['id'], h['resultado'])
             
         except Exception:
@@ -380,7 +376,7 @@ def escanear_partidos():
                                 "mercado": "HT", "recomendacion": "OVER", "linea": linea,
                                 "cuota": cuota_reg, "resultado": "Pendiente"
                             }
-                            HISTORIAL.append(alerta)
+                            HISTORIAL.insert(0, alerta) # Se inserta al principio
                             guardar_alerta_turso(alerta)
 
                 # FT (A PARTIR DEL MINUTO 70)
@@ -418,7 +414,7 @@ def escanear_partidos():
                                     "mercado": "FT", "recomendacion": rec, "linea": linea,
                                     "cuota": cf, "resultado": "Pendiente"
                                 }
-                                HISTORIAL.append(alerta)
+                                HISTORIAL.insert(0, alerta) # Se inserta al principio
                                 guardar_alerta_turso(alerta)
         except Exception:
             continue
@@ -476,7 +472,8 @@ HTML_TEMPLATE = """
         .badge-on { background: rgba(16, 185, 129, 0.2); color: var(--green); }
         .badge-off { background: rgba(239, 68, 68, 0.2); color: var(--red); }
 
-        .stats { background: var(--card-bg); padding: 20px; border-radius: 12px; margin-bottom: 24px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; text-align: center; }
+        /* Ajuste para las 6 tarjetas */
+        .stats { background: var(--card-bg); padding: 20px; border-radius: 12px; margin-bottom: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 16px; text-align: center; }
         .stat-item { display: flex; flex-direction: column; gap: 4px; }
         .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
         .stat-value { font-size: 22px; font-weight: bold; }
@@ -500,7 +497,6 @@ HTML_TEMPLATE = """
         .bet-cuota { font-size: 14px; color: var(--text-main); }
         
         .card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 12px; }
-        .edge { background: rgba(16, 185, 129, 0.15); color: var(--green); padding: 4px 8px; border-radius: 4px; font-weight: bold; }
         .time { color: var(--text-muted); }
         .res-badge { font-weight: bold; font-size: 11px; padding: 4px 8px; border-radius: 4px; }
         .res-pendiente { color: var(--yellow); }
@@ -541,6 +537,18 @@ HTML_TEMPLATE = """
             <div class="stat-label">Win Rate</div>
             <div class="stat-value v-yellow">{{ winrate }}%</div>
         </div>
+        <div class="stat-item">
+            <div class="stat-label">Unidades</div>
+            <div class="stat-value {% if units >= 0 %}v-green{% else %}v-red{% endif %}">
+                {{ "%+.2f"|format(units) }}
+            </div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-label">ROI</div>
+            <div class="stat-value {% if roi >= 0 %}v-green{% else %}v-red{% endif %}">
+                {{ "%+.1f"|format(roi) }}%
+            </div>
+        </div>
     </div>
 
     <div class="section-title">Señales Recientes</div>
@@ -577,21 +585,31 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
-    # La función cargar_historial() ha sido removida de aquí para no saturar Turso en cada refresh.
-    
     total = len(HISTORIAL)
     ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada')
     perdidas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Perdida')
     ev = ganadas + perdidas
     wr = round((ganadas / ev * 100), 1) if ev else 0.0
     
+    # Cálculo de Unidades y ROI
+    units = 0.0
+    for h in HISTORIAL:
+        if h.get('resultado') == 'Ganada':
+            cuota = h.get('cuota') or 0
+            if cuota > 1.0:
+                units += (cuota - 1.0)
+        elif h.get('resultado') == 'Perdida':
+            units -= 1.0
+            
+    roi = round((units / ev * 100), 1) if ev > 0 else 0.0
+    
     return render_template_string(
         HTML_TEMPLATE,
         scanner_activo=SCANNER_ACTIVO,
-        historial=list(reversed(HISTORIAL))[-50:], 
+        historial=HISTORIAL[:50], # Muestra las 50 más nuevas (el 0 es la más nueva)
         total=total, ganadas=ganadas, perdidas=perdidas,
         winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
-        vivos=ESTADO_INFO["vivos"]
+        vivos=ESTADO_INFO["vivos"], units=units, roi=roi
     )
 
 @app.route('/stop')
