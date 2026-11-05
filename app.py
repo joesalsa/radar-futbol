@@ -79,14 +79,30 @@ def init_db():
 
 def cargar_historial():
     global HISTORIAL, ALERTAS_ENVIADAS
-    if os.path.exists(HISTORIAL_FILE):
-        try:
-            with open(HISTORIAL_FILE, 'r', encoding='utf-8') as f:
-                HISTORIAL = json.load(f)
-            for h in HISTORIAL:
-                ALERTAS_ENVIADAS.add(h['id'])
-        except Exception:
-            HISTORIAL = []
+    try:
+        with db() as con:
+            # Traemos hasta 1000 registros ordenados por fecha
+            rows = con.execute("""
+                SELECT id, fecha, partido, liga_nombre, mercado, recomendacion,
+                       linea, cuota, resultado, liga_code, event_id
+                FROM historial_apuestas
+                ORDER BY fecha DESC
+                LIMIT 1000
+            """).fetchall()
+        
+        HISTORIAL = []
+        for r in rows:
+            HISTORIAL.append({
+                "id": r[0], "fecha": r[1], "partido": r[2], "liga_nombre": r[3],
+                "mercado": r[4], "recomendacion": r[5], "linea": r[6],
+                "cuota": r[7], "resultado": r[8], "liga_code": r[9], "event_id": r[10]
+            })
+            ALERTAS_ENVIADAS.add(r[0])
+            
+        print(f"📥 Historial cargado desde Turso: {len(HISTORIAL)} registros", flush=True)
+    except Exception as e:
+        print(f"[cargar_historial] Error: {e}", flush=True)
+        HISTORIAL = []
 
 def guardar_historial():
     try:
