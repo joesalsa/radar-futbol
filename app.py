@@ -37,13 +37,13 @@ ESTADO_INFO      = {
     "ciclо": 0,
 }
 
+# ==== LIGAS (Filtradas: sin MLS, Liga Argentina, Brasileirão ni League One) ====
 LIGAS_TOP = {
-    "eng.1": "Premier League", "eng.3": "League One", "esp.1": "La Liga",
+    "eng.1": "Premier League", "esp.1": "La Liga",
     "ita.1": "Serie A", "ger.1": "Bundesliga", "fra.1": "Ligue 1",
     "uefa.champions": "Champions League", "uefa.europa": "Europa League",
-    "uefa.europa.conf": "Conference League", "usa.1": "MLS", "mex.1": "Liga MX",
-    "arg.1": "Liga Argentina", "bra.1": "Brasileirão",
-    "conmebol.libertadores": "Libertadores", "conmebol.sudamericana": "Sudamericana"
+    "uefa.europa.conf": "Conference League", "mex.1": "Liga MX",
+    "conmebol.libertadores": "Libertadores"
 }
 
 UMBRAL_HT_PROB = 42.0
@@ -341,7 +341,7 @@ def escanear_partidos():
                     factor = ((tiros / max(1, 25*fr)) + (corners / max(1, 10*fr))) / 2.0
                     factor = max(0.5, min(2.0, factor))
 
-                # HT
+                # HT (Medio Tiempo)
                 if 15 <= minuto <= 35 and gt == 0 and factor > 1.1:
                     clave = f"{event_id}_HT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -350,34 +350,33 @@ def escanear_partidos():
                         ll, lv = calcular_lambdas(pl, pv)
                         lam = calcular_lambda_remaining(pl, pv, ll, lv, minuto, 'HT') * factor
                         prob = prob_al_menos_uno(lam)
+                        
                         if prob >= UMBRAL_HT_PROB:
-                            ALERTAS_ENVIADAS.add(clave)
                             cuotas = buscar_cuota_infersports(eq_l, eq_v, "half_time")
                             if cuotas:
                                 linea = cuotas['linea']
+                                cuota_reg = cuotas['cuota_over']
+                                
+                                # FILTRO DE CUOTA MÍNIMA
+                                if cuota_reg < 1.80:
+                                    continue # Esperar al próximo escaneo
+                                    
+                                ALERTAS_ENVIADAS.add(clave)
                                 valor = prob - cuotas['prob_casa_over']
                                 msj = (f"🔥 *VALOR HT* 🔥\n⚽ *[{liga_nombre}]* {nombre}\n"
                                        f"⏱️ {minuto}' | 0-0 | {tiros} tiros, {corners} córners (Ritmo {factor:.2f}x)\n"
-                                       f"🔥 *RECOMENDACIÓN: OVER {linea} @ {cuotas['cuota_over']:.2f}* ({cuotas['bookmaker']})\n"
+                                       f"🔥 *RECOMENDACIÓN: OVER {linea} @ {cuota_reg:.2f}* ({cuotas['bookmaker']})\n"
                                        f"📊 Bot: *{prob:.1f}%* vs Casa: {cuotas['prob_casa_over']:.1f}% → Edge {valor:+.1f}%")
-                                cuota_reg = cuotas['cuota_over']
-                            else:
-                                linea = 0.5
-                                msj = (f"🔥 *ALERTA GOL HT* 🔥\n⚽ *[{liga_nombre}]* {nombre}\n"
-                                       f"⏱️ {minuto}' | 0-0 | {tiros} tiros, {corners} córners (Ritmo {factor:.2f}x)\n"
-                                       f"🔥 *RECOMENDACIÓN: OVER 0.5 HT*\n"
-                                       f"📊 Prob gol antes descanso: *{prob:.1f}%*\n⚠️ Sin cuota disponible.")
-                                cuota_reg = 0
-                            enviar_alerta_telegram(msj)
-                            
-                            alerta = {
-                                "id": clave, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                "liga_code": liga_code, "event_id": event_id, "partido": nombre, "liga_nombre": liga_nombre,
-                                "mercado": "HT", "recomendacion": "OVER", "linea": linea,
-                                "cuota": cuota_reg, "resultado": "Pendiente"
-                            }
-                            HISTORIAL.insert(0, alerta) # Se inserta al principio
-                            guardar_alerta_turso(alerta)
+                                enviar_alerta_telegram(msj)
+                                
+                                alerta = {
+                                    "id": clave, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                    "liga_code": liga_code, "event_id": event_id, "partido": nombre, "liga_nombre": liga_nombre,
+                                    "mercado": "HT", "recomendacion": "OVER", "linea": linea,
+                                    "cuota": cuota_reg, "resultado": "Pendiente"
+                                }
+                                HISTORIAL.insert(0, alerta)
+                                guardar_alerta_turso(alerta)
 
                 # FT (A PARTIR DEL MINUTO 70)
                 elif 70 <= minuto <= 80:
@@ -395,13 +394,25 @@ def escanear_partidos():
                             prob_u = 100.0 - prob_o
                             v_o = prob_o - cuotas['prob_casa_over']
                             v_u = prob_u - cuotas['prob_casa_under']
+                            
                             if v_o > UMBRAL_FT_VALOR or v_u > UMBRAL_FT_VALOR:
-                                ALERTAS_ENVIADAS.add(clave)
                                 rec = "OVER" if v_o > v_u else "UNDER"
                                 pb = prob_o if rec == "OVER" else prob_u
                                 pc = cuotas['prob_casa_over'] if rec == "OVER" else cuotas['prob_casa_under']
                                 cf = cuotas['cuota_over'] if rec == "OVER" else cuotas['cuota_under']
                                 vv = v_o if rec == "OVER" else v_u
+                                
+                                # FILTRO DE CUOTA MÍNIMA
+                                if cf < 1.80:
+                                    continue # Esperar al próximo escaneo
+                                    
+                                # CANDADO DE LÍNEAS
+                                if rec == "OVER" and linea > 4.5:
+                                    continue # No apostar Over > 4.5
+                                if rec == "UNDER" and linea > 1.5:
+                                    continue # No apostar Under > 1.5
+                                    
+                                ALERTAS_ENVIADAS.add(clave)
                                 msj = (f"🚨 *VALOR FT* 🚨\n⚽ *[{liga_nombre}]* {nombre}\n"
                                        f"⏱️ {minuto}' | {sl}-{sv} | {tiros} tiros, {corners} córners (Ritmo {factor:.2f}x)\n"
                                        f"🔥 *RECOMENDACIÓN: {rec} {linea} @ {cf:.2f}* ({cuotas['bookmaker']})\n"
@@ -414,7 +425,7 @@ def escanear_partidos():
                                     "mercado": "FT", "recomendacion": rec, "linea": linea,
                                     "cuota": cf, "resultado": "Pendiente"
                                 }
-                                HISTORIAL.insert(0, alerta) # Se inserta al principio
+                                HISTORIAL.insert(0, alerta)
                                 guardar_alerta_turso(alerta)
         except Exception:
             continue
@@ -439,7 +450,7 @@ def loop_escaner():
             print(f"Loop err: {e}", flush=True)
         time.sleep(300)
 
-# ==== DASHBOARD HTML (ESTILO NBA) ====
+# ==== DASHBOARD HTML ====
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -472,7 +483,6 @@ HTML_TEMPLATE = """
         .badge-on { background: rgba(16, 185, 129, 0.2); color: var(--green); }
         .badge-off { background: rgba(239, 68, 68, 0.2); color: var(--red); }
 
-        /* Ajuste para las 6 tarjetas */
         .stats { background: var(--card-bg); padding: 20px; border-radius: 12px; margin-bottom: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 16px; text-align: center; }
         .stat-item { display: flex; flex-direction: column; gap: 4px; }
         .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -591,7 +601,6 @@ def home():
     ev = ganadas + perdidas
     wr = round((ganadas / ev * 100), 1) if ev else 0.0
     
-    # Cálculo de Unidades y ROI
     units = 0.0
     for h in HISTORIAL:
         if h.get('resultado') == 'Ganada':
@@ -606,7 +615,7 @@ def home():
     return render_template_string(
         HTML_TEMPLATE,
         scanner_activo=SCANNER_ACTIVO,
-        historial=HISTORIAL[:50], # Muestra las 50 más nuevas (el 0 es la más nueva)
+        historial=HISTORIAL[:50],
         total=total, ganadas=ganadas, perdidas=perdidas,
         winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
         vivos=ESTADO_INFO["vivos"], units=units, roi=roi
