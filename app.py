@@ -637,6 +637,11 @@ def start():
 def ping():
     return "pong", 200
 
+# --- RUTA AGREGADA PARA UPTIMEROBOT ---
+@app.route('/health', methods=['GET', 'HEAD'])
+def health_check():
+    return "OK", 200
+
 # ==== ARRANQUE ====
 def _start_scanner():
     t = threading.Thread(target=loop_escaner, daemon=True)
