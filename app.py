@@ -37,6 +37,7 @@ ESTADO_INFO      = {
     "ciclо": 0,
 }
 
+# ==== LIGAS (Filtradas: sin MLS, Liga Argentina, Brasileirão ni League One) ====
 LIGAS_TOP = {
     "eng.1": "Premier League", "esp.1": "La Liga",
     "ita.1": "Serie A", "ger.1": "Bundesliga", "fra.1": "Ligue 1",
@@ -86,40 +87,33 @@ def cargar_historial():
                 LIMIT 1000
             """).fetchall()
         
-        nuevo_historial = []
+        HISTORIAL = []
         for r in rows:
-            nuevo_historial.append({
-                "id": r[0] or "", "fecha": r[1] or "", "partido": r[2] or "", 
-                "liga_nombre": r[3] or "", "mercado": r[4] or "", "recomendacion": r[5] or "",
-                "linea": r[6] or 0.0, "cuota": r[7] or 0.0, 
-                "resultado": r[8] or "Pendiente", # Evita que Jinja explote si es None
-                "liga_code": r[9] or "", "event_id": r[10] or ""
+            HISTORIAL.append({
+                "id": r[0], "fecha": r[1], "partido": r[2], "liga_nombre": r[3],
+                "mercado": r[4], "recomendacion": r[5], "linea": r[6],
+                "cuota": r[7], "resultado": r[8], "liga_code": r[9], "event_id": r[10]
             })
-            if r[0]: ALERTAS_ENVIADAS.add(r[0])
+            ALERTAS_ENVIADAS.add(r[0])
             
-        HISTORIAL = nuevo_historial
-        print(f"📥 Historial recargado desde Turso: {len(HISTORIAL)} registros", flush=True)
+        print(f"📥 Historial cargado desde Turso: {len(HISTORIAL)} registros", flush=True)
     except Exception as e:
-        print(f"⚠️ [cargar_historial] Error al leer de Turso: {e}. Usando memoria local.", flush=True)
-        # NO HACEMOS HISTORIAL = [] para no borrar lo que ya estaba en memoria
+        print(f"[cargar_historial] Error: {e}", flush=True)
+        HISTORIAL = []
 
 def guardar_alerta_turso(h):
-    for intento in range(3):
-        try:
-            with db() as con:
-                con.execute("""
-                    INSERT OR REPLACE INTO historial_apuestas
-                    (id, fecha, partido, liga_nombre, mercado, recomendacion,
-                     linea, cuota, resultado, liga_code, event_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (h["id"], h["fecha"], h["partido"], h["liga_nombre"],
-                      h["mercado"], h["recomendacion"], h["linea"], h["cuota"],
-                      h["resultado"], h.get("liga_code"), h.get("event_id")))
-            print(f"   ✅ [TURSO] Guardado: {h['id']} -> {h['partido']}", flush=True)
-            return
-        except Exception as e:
-            print(f"   ⚠️ [TURSO] Intento {intento+1}/3 fallido: {e}", flush=True)
-            time.sleep(1)
+    try:
+        with db() as con:
+            con.execute("""
+                INSERT OR REPLACE INTO historial_apuestas
+                (id, fecha, partido, liga_nombre, mercado, recomendacion,
+                 linea, cuota, resultado, liga_code, event_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (h["id"], h["fecha"], h["partido"], h["liga_nombre"],
+                  h["mercado"], h["recomendacion"], h["linea"], h["cuota"],
+                  h["resultado"], h.get("liga_code"), h.get("event_id")))
+    except Exception as e:
+        print(f"[guardar_alerta_turso] Error: {e}", flush=True)
 
 def actualizar_resultado_turso(alert_id, resultado):
     try:
@@ -131,7 +125,7 @@ def actualizar_resultado_turso(alert_id, resultado):
 init_db()
 cargar_historial()
 
-# ==== TELEGRAM ====
+# ==== TELEGRAM (solo envía) ====
 def enviar_alerta_telegram(mensaje):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
@@ -347,7 +341,7 @@ def escanear_partidos():
                     factor = ((tiros / max(1, 25*fr)) + (corners / max(1, 10*fr))) / 2.0
                     factor = max(0.5, min(2.0, factor))
 
-                # HT
+                # HT (Medio Tiempo)
                 if 15 <= minuto <= 35 and gt == 0 and factor > 1.1:
                     clave = f"{event_id}_HT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -362,7 +356,10 @@ def escanear_partidos():
                             if cuotas:
                                 linea = cuotas['linea']
                                 cuota_reg = cuotas['cuota_over']
-                                if cuota_reg < 1.80: continue
+                                
+                                # FILTRO DE CUOTA MÍNIMA
+                                if cuota_reg < 1.80:
+                                    continue # Esperar al próximo escaneo
                                     
                                 ALERTAS_ENVIADAS.add(clave)
                                 valor = prob - cuotas['prob_casa_over']
@@ -381,7 +378,7 @@ def escanear_partidos():
                                 HISTORIAL.insert(0, alerta)
                                 guardar_alerta_turso(alerta)
 
-                # FT
+                # FT (A PARTIR DEL MINUTO 70)
                 elif 70 <= minuto <= 80:
                     clave = f"{event_id}_FT"
                     if clave not in ALERTAS_ENVIADAS:
@@ -405,9 +402,15 @@ def escanear_partidos():
                                 cf = cuotas['cuota_over'] if rec == "OVER" else cuotas['cuota_under']
                                 vv = v_o if rec == "OVER" else v_u
                                 
-                                if cf < 1.80: continue
-                                if rec == "OVER" and linea > 4.5: continue
-                                if rec == "UNDER" and linea > 1.5: continue
+                                # FILTRO DE CUOTA MÍNIMA
+                                if cf < 1.80:
+                                    continue # Esperar al próximo escaneo
+                                    
+                                # CANDADO DE LÍNEAS
+                                if rec == "OVER" and linea > 4.5:
+                                    continue # No apostar Over > 4.5
+                                if rec == "UNDER" and linea > 1.5:
+                                    continue # No apostar Under > 1.5
                                     
                                 ALERTAS_ENVIADAS.add(clave)
                                 msj = (f"🚨 *VALOR FT* 🚨\n⚽ *[{liga_nombre}]* {nombre}\n"
@@ -592,9 +595,6 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
-    # Recargamos el historial desde Turso para mantener la web sincronizada
-    cargar_historial()
-
     total = len(HISTORIAL)
     ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada')
     perdidas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Perdida')
@@ -612,18 +612,14 @@ def home():
             
     roi = round((units / ev * 100), 1) if ev > 0 else 0.0
     
-    try:
-        return render_template_string(
-            HTML_TEMPLATE,
-            scanner_activo=SCANNER_ACTIVO,
-            historial=HISTORIAL[:50],
-            total=total, ganadas=ganadas, perdidas=perdidas,
-            winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
-            vivos=ESTADO_INFO["vivos"], units=units, roi=roi
-        )
-    except Exception as e:
-        print(f"Error al renderizar dashboard: {e}")
-        return f"Error en el panel: {e}", 500
+    return render_template_string(
+        HTML_TEMPLATE,
+        scanner_activo=SCANNER_ACTIVO,
+        historial=HISTORIAL[:50],
+        total=total, ganadas=ganadas, perdidas=perdidas,
+        winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
+        vivos=ESTADO_INFO["vivos"], units=units, roi=roi
+    )
 
 @app.route('/stop')
 def stop():
@@ -641,6 +637,7 @@ def start():
 def ping():
     return "pong", 200
 
+# --- RUTA AGREGADA PARA UPTIMEROBOT ---
 @app.route('/health', methods=['GET', 'HEAD'])
 def health_check():
     return "OK", 200
