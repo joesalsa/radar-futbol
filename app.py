@@ -37,7 +37,6 @@ ESTADO_INFO      = {
     "ciclо": 0,
 }
 
-# ==== LIGAS ====
 LIGAS_TOP = {
     "eng.1": "Premier League", "esp.1": "La Liga",
     "ita.1": "Serie A", "ger.1": "Bundesliga", "fra.1": "Ligue 1",
@@ -87,22 +86,24 @@ def cargar_historial():
                 LIMIT 1000
             """).fetchall()
         
-        HISTORIAL = []
+        nuevo_historial = []
         for r in rows:
-            HISTORIAL.append({
-                "id": r[0], "fecha": r[1], "partido": r[2], "liga_nombre": r[3],
-                "mercado": r[4], "recomendacion": r[5], "linea": r[6],
-                "cuota": r[7], "resultado": r[8], "liga_code": r[9], "event_id": r[10]
+            nuevo_historial.append({
+                "id": r[0] or "", "fecha": r[1] or "", "partido": r[2] or "", 
+                "liga_nombre": r[3] or "", "mercado": r[4] or "", "recomendacion": r[5] or "",
+                "linea": r[6] or 0.0, "cuota": r[7] or 0.0, 
+                "resultado": r[8] or "Pendiente", # Evita que Jinja explote si es None
+                "liga_code": r[9] or "", "event_id": r[10] or ""
             })
-            ALERTAS_ENVIADAS.add(r[0])
+            if r[0]: ALERTAS_ENVIADAS.add(r[0])
             
-        print(f"📥 Historial cargado desde Turso: {len(HISTORIAL)} registros", flush=True)
+        HISTORIAL = nuevo_historial
+        print(f"📥 Historial recargado desde Turso: {len(HISTORIAL)} registros", flush=True)
     except Exception as e:
-        print(f"[cargar_historial] Error: {e}", flush=True)
-        HISTORIAL = []
+        print(f"⚠️ [cargar_historial] Error al leer de Turso: {e}. Usando memoria local.", flush=True)
+        # NO HACEMOS HISTORIAL = [] para no borrar lo que ya estaba en memoria
 
 def guardar_alerta_turso(h):
-    # Bucle de reintentos para evitar microcortes
     for intento in range(3):
         try:
             with db() as con:
@@ -115,7 +116,7 @@ def guardar_alerta_turso(h):
                       h["mercado"], h["recomendacion"], h["linea"], h["cuota"],
                       h["resultado"], h.get("liga_code"), h.get("event_id")))
             print(f"   ✅ [TURSO] Guardado: {h['id']} -> {h['partido']}", flush=True)
-            return # Si guarda bien, sale de la función
+            return
         except Exception as e:
             print(f"   ⚠️ [TURSO] Intento {intento+1}/3 fallido: {e}", flush=True)
             time.sleep(1)
@@ -591,7 +592,7 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
-    # AHORA RECARGA EL HISTORIAL DESDE TURSO EN CADA VISITA
+    # Recargamos el historial desde Turso para mantener la web sincronizada
     cargar_historial()
 
     total = len(HISTORIAL)
@@ -611,14 +612,18 @@ def home():
             
     roi = round((units / ev * 100), 1) if ev > 0 else 0.0
     
-    return render_template_string(
-        HTML_TEMPLATE,
-        scanner_activo=SCANNER_ACTIVO,
-        historial=HISTORIAL[:50],
-        total=total, ganadas=ganadas, perdidas=perdidas,
-        winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
-        vivos=ESTADO_INFO["vivos"], units=units, roi=roi
-    )
+    try:
+        return render_template_string(
+            HTML_TEMPLATE,
+            scanner_activo=SCANNER_ACTIVO,
+            historial=HISTORIAL[:50],
+            total=total, ganadas=ganadas, perdidas=perdidas,
+            winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
+            vivos=ESTADO_INFO["vivos"], units=units, roi=roi
+        )
+    except Exception as e:
+        print(f"Error al renderizar dashboard: {e}")
+        return f"Error en el panel: {e}", 500
 
 @app.route('/stop')
 def stop():
