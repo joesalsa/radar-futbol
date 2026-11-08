@@ -30,6 +30,7 @@ SCANNER_ACTIVO   = True
 ALERTAS_ENVIADAS = set()
 MEMORIA_EQUIPOS  = {}
 HISTORIAL        = []
+SEÑALES_EN_MONITOREO = {}  # <--- NUEVO: Diccionario para rastrear goles post-señal
 ESTADO_INFO      = {
     "ultimo_scan": "-",
     "vivos": 0,
@@ -37,7 +38,7 @@ ESTADO_INFO      = {
     "ciclо": 0,
 }
 
-# ==== LIGAS (Filtradas: sin MLS, Liga Argentina, Brasileirão ni League One) ====
+# ==== LIGAS (Filtradas) ====
 LIGAS_TOP = {
     "eng.1": "Premier League", "esp.1": "La Liga",
     "ita.1": "Serie A", "ger.1": "Bundesliga", "fra.1": "Ligue 1",
@@ -102,18 +103,22 @@ def cargar_historial():
         HISTORIAL = []
 
 def guardar_alerta_turso(h):
-    try:
-        with db() as con:
-            con.execute("""
-                INSERT OR REPLACE INTO historial_apuestas
-                (id, fecha, partido, liga_nombre, mercado, recomendacion,
-                 linea, cuota, resultado, liga_code, event_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (h["id"], h["fecha"], h["partido"], h["liga_nombre"],
-                  h["mercado"], h["recomendacion"], h["linea"], h["cuota"],
-                  h["resultado"], h.get("liga_code"), h.get("event_id")))
-    except Exception as e:
-        print(f"[guardar_alerta_turso] Error: {e}", flush=True)
+    for intento in range(3):
+        try:
+            with db() as con:
+                con.execute("""
+                    INSERT OR REPLACE INTO historial_apuestas
+                    (id, fecha, partido, liga_nombre, mercado, recomendacion,
+                     linea, cuota, resultado, liga_code, event_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (h["id"], h["fecha"], h["partido"], h["liga_nombre"],
+                      h["mercado"], h["recomendacion"], h["linea"], h["cuota"],
+                      h["resultado"], h.get("liga_code"), h.get("event_id")))
+            print(f"   ✅ [TURSO] Guardado: {h['id']} -> {h['partido']}", flush=True)
+            return
+        except Exception as e:
+            print(f"   ⚠️ [TURSO] Intento {intento+1}/3 fallido: {e}", flush=True)
+            time.sleep(1)
 
 def actualizar_resultado_turso(alert_id, resultado):
     try:
@@ -125,17 +130,18 @@ def actualizar_resultado_turso(alert_id, resultado):
 init_db()
 cargar_historial()
 
-# ==== TELEGRAM (solo envía) ====
+# ==== TELEGRAM ====
 def enviar_alerta_telegram(mensaje):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return False
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"},
             timeout=5
         )
+        return r.status_code == 200
     except Exception:
-        pass
+        return False
 
 # ==== UTILIDADES ====
 def cuota_decimal_a_prob(cuota):
@@ -315,18 +321,71 @@ def escanear_partidos():
         try:
             eventos = requests.get(url, timeout=6).json().get('events', [])
             for partido in eventos:
-                if partido['status']['type']['state'] != 'in': continue
+                event_id = partido['id']
+                state = partido['status']['type']['state']
+
+                # Limpiar FT terminados
+                if state == 'post':
+                    if event_id in SEÑALES_EN_MONITOREO:
+                        if SEÑALES_EN_MONITOREO[event_id]['tipo'] == 'FT':
+                            del SEÑALES_EN_MONITOREO[event_id]
+                    continue
+
+                if state != 'in': continue
                 vivos += 1
-                event_id = partido['id']; nombre = partido['name']
+                
+                nombre = partido['name']
                 ms = partido['status'].get('displayClock', '0')
-                minuto = int(ms.replace("'", "")) if "'" in ms else int(ms.split(":")[0]) if ":" in ms else 45
-                if minuto > 80: continue
+                
+                # Parseo seguro del minuto
+                try:
+                    if ":" in ms: minuto = int(ms.split(":")[0])
+                    elif "'" in ms: minuto = int(ms.replace("'", ""))
+                    else: minuto = 45
+                except:
+                    minuto = 45
+
                 comp = partido['competitions'][0]
                 eq_l = comp['competitors'][0]['team']['displayName']
                 eq_v = comp['competitors'][1]['team']['displayName']
                 sl = _parse_score(comp['competitors'][0].get('score', 0))
                 sv = _parse_score(comp['competitors'][1].get('score', 0))
                 gt = sl + sv
+
+                # ==========================================
+                # MONITOREO DE GOLES Y RESOLUCIÓN HT
+                # ==========================================
+                if event_id in SEÑALES_EN_MONITOREO:
+                    senal = SEÑALES_EN_MONITOREO[event_id]
+                    s_old = senal["score_actual"]
+                    s_new = (sl, sv)
+
+                    # Alerta de Gol después de la señal
+                    if (s_new[0] + s_new[1]) > (s_old[0] + s_old[1]):
+                        msg_gol = f"⚽ *¡GOL ANOTADO!* ⚽\n🏆 {nombre}\n⏱️ {minuto}' | Marcador: {sl}-{sv}\n💡 Señal activa: {senal['recomendacion']}"
+                        enviar_alerta_telegram(msg_gol)
+                        senal["score_actual"] = s_new  # Actualizamos marcador
+
+                    # Resolución de HT (solo si es una señal de HT)
+                    period = partido['status'].get('period', 0)
+                    desc_status = partido['status']['type'].get('description', '')
+                    is_halftime = (period == 2 and ms in ['0:00', '0.0']) or ("Half" in desc_status) or (minuto >= 45)
+
+                    if senal["tipo"] == "HT" and is_halftime:
+                        total_ht = s_new[0] + s_new[1]
+                        if total_ht > senal["linea"]:
+                            res_txt = "✅ *GANADA*"
+                        else:
+                            res_txt = "❌ *PERDIDA*"
+                        
+                        msg_res = f"📊 *RESULTADO HT* 📊\n⚽ {nombre}\nMarcador HT: {sl}-{sv}\nSeñal: {senal['recomendacion']} → {res_txt}"
+                        enviar_alerta_telegram(msg_res)
+                        del SEÑALES_EN_MONITOREO[event_id]
+
+                # ==========================================
+                # GENERACIÓN DE NUEVAS SEÑALES
+                # ==========================================
+                if minuto > 80: continue
 
                 u = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{liga_code}/summary?event={event_id}"
                 data = requests.get(u, timeout=6).json()
@@ -356,10 +415,7 @@ def escanear_partidos():
                             if cuotas:
                                 linea = cuotas['linea']
                                 cuota_reg = cuotas['cuota_over']
-                                
-                                # FILTRO DE CUOTA MÍNIMA
-                                if cuota_reg < 1.80:
-                                    continue # Esperar al próximo escaneo
+                                if cuota_reg < 1.80: continue
                                     
                                 ALERTAS_ENVIADAS.add(clave)
                                 valor = prob - cuotas['prob_casa_over']
@@ -367,7 +423,16 @@ def escanear_partidos():
                                        f"⏱️ {minuto}' | 0-0 | {tiros} tiros, {corners} córners (Ritmo {factor:.2f}x)\n"
                                        f"🔥 *RECOMENDACIÓN: OVER {linea} @ {cuota_reg:.2f}* ({cuotas['bookmaker']})\n"
                                        f"📊 Bot: *{prob:.1f}%* vs Casa: {cuotas['prob_casa_over']:.1f}% → Edge {valor:+.1f}%")
-                                enviar_alerta_telegram(msj)
+                                
+                                if enviar_alerta_telegram(msj):
+                                    # <--- REGISTRAMOS LA SEÑAL PARA MONITOREO
+                                    SEÑALES_EN_MONITOREO[event_id] = {
+                                        "tipo": "HT",
+                                        "partido": nombre,
+                                        "score_actual": (sl, sv),
+                                        "recomendacion": f"OVER {linea}",
+                                        "linea": linea
+                                    }
                                 
                                 alerta = {
                                     "id": clave, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -402,23 +467,26 @@ def escanear_partidos():
                                 cf = cuotas['cuota_over'] if rec == "OVER" else cuotas['cuota_under']
                                 vv = v_o if rec == "OVER" else v_u
                                 
-                                # FILTRO DE CUOTA MÍNIMA
-                                if cf < 1.80:
-                                    continue # Esperar al próximo escaneo
-                                    
-                                # CANDADO DE LÍNEAS
-                                if rec == "OVER" and linea > 4.5:
-                                    continue # No apostar Over > 4.5
-                                if rec == "UNDER" and linea > 1.5:
-                                    continue # No apostar Under > 1.5
+                                if cf < 1.80: continue
+                                if rec == "OVER" and linea > 4.5: continue
+                                if rec == "UNDER" and linea > 1.5: continue
                                     
                                 ALERTAS_ENVIADAS.add(clave)
                                 msj = (f"🚨 *VALOR FT* 🚨\n⚽ *[{liga_nombre}]* {nombre}\n"
                                        f"⏱️ {minuto}' | {sl}-{sv} | {tiros} tiros, {corners} córners (Ritmo {factor:.2f}x)\n"
                                        f"🔥 *RECOMENDACIÓN: {rec} {linea} @ {cf:.2f}* ({cuotas['bookmaker']})\n"
                                        f"📊 Bot: *{pb:.1f}%* vs Casa: {pc:.1f}% → Edge {vv:+.1f}%")
-                                enviar_alerta_telegram(msj)
                                 
+                                if enviar_alerta_telegram(msj):
+                                    # <--- REGISTRAMOS LA SEÑAL PARA MONITOREO
+                                    SEÑALES_EN_MONITOREO[event_id] = {
+                                        "tipo": "FT",
+                                        "partido": nombre,
+                                        "score_actual": (sl, sv),
+                                        "recomendacion": f"{rec} {linea}",
+                                        "linea": linea
+                                    }
+
                                 alerta = {
                                     "id": clave, "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
                                     "liga_code": liga_code, "event_id": event_id, "partido": nombre, "liga_nombre": liga_nombre,
@@ -595,6 +663,8 @@ HTML_TEMPLATE = """
 # ==== RUTAS FLASK ====
 @app.route('/')
 def home():
+    cargar_historial()
+
     total = len(HISTORIAL)
     ganadas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Ganada')
     perdidas = sum(1 for h in HISTORIAL if h.get('resultado') == 'Perdida')
@@ -612,14 +682,18 @@ def home():
             
     roi = round((units / ev * 100), 1) if ev > 0 else 0.0
     
-    return render_template_string(
-        HTML_TEMPLATE,
-        scanner_activo=SCANNER_ACTIVO,
-        historial=HISTORIAL[:50],
-        total=total, ganadas=ganadas, perdidas=perdidas,
-        winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
-        vivos=ESTADO_INFO["vivos"], units=units, roi=roi
-    )
+    try:
+        return render_template_string(
+            HTML_TEMPLATE,
+            scanner_activo=SCANNER_ACTIVO,
+            historial=HISTORIAL[:50],
+            total=total, ganadas=ganadas, perdidas=perdidas,
+            winrate=wr, ultimo_scan=ESTADO_INFO["ultimo_scan"],
+            vivos=ESTADO_INFO["vivos"], units=units, roi=roi
+        )
+    except Exception as e:
+        print(f"Error al renderizar dashboard: {e}")
+        return f"Error en el panel: {e}", 500
 
 @app.route('/stop')
 def stop():
@@ -637,7 +711,6 @@ def start():
 def ping():
     return "pong", 200
 
-# --- RUTA AGREGADA PARA UPTIMEROBOT ---
 @app.route('/health', methods=['GET', 'HEAD'])
 def health_check():
     return "OK", 200
